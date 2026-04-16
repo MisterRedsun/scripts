@@ -1,59 +1,31 @@
 """
-LaunchBox Export Script
+Export LaunchBox game metadata and media into a Batocera-compatible tree.
 
-PURPOSE:
-    Exports game metadata, media (box art, screenshots, videos, etc.), and optionally 
-    ROM files from LaunchBox to a Batocera-compatible folder structure with gamelist.xml files.
-    Also exports to Mustard OS format with text descriptions and specific media formatting.
+Requirements: Python 3.9+ and Pillow (pip install Pillow)
 
-REQUIREMENTS:
-    - Python 3.x
-    - PIL/Pillow library (install via: pip install Pillow)
-    - LaunchBox installation with game metadata and media
-    - Sufficient disk space in the output directory
+For each platform listed in PLATFORMS, parses LaunchBox's platform XML,
+copies the matching box art / screenshot / marquee / video / manual (and
+optionally the ROM) into the output directory under the Batocera folder 
+name, renames every media file to the ROM basename so frontends like
+ES-DE pick it up, and writes one gamelist.xml per platform. Marquees are
+trimmed; other images can be converted to PNG. With --recents-only, only
+games whose DateAdded falls within the last --recent-days are exported;
+games missing DateAdded are skipped and counted in the final summary.
 
-CONFIGURATION:
-    Edit the variables below before running:
-    - TEST_RUN: Set to True to simulate the export without copying files (for testing)
-    - VERBOSE: Set to True to print detailed processing info for each game
-    - LB_DIR: Path to your LaunchBox installation folder
-    - LOCAL_OUTPUT_DIR: Where to export the files
-    - OS_TARGETS: List of target operating systems to export. New OSes can be added by defining settings in OS_SETTINGS and adding to this list.
-    - COPY_ROMS: Set True to copy ROM files (can be large!)
-    - COPY_MEDIA: Set True to copy media files
-    - CONVERT_TO_PNG: Convert JPG images to PNG format
-    - RECENTS_ONLY: Export only recently added games
-    - RECENT_DAYS: Number of days to consider "recent" if recents_only is True
-    - USE_PLAYLIST: Set True to export only games in a specific playlist, with a prompt to choose from available playlists
-    - PLATFORMS: A dictionary that maps LaunchBox platform names to output folder names
-                 (uncomment the platforms you want to export)
-
-FUNCTIONALITY:
-    - Reads LaunchBox platform XML files to extract game metadata
-    - Copies and organizes media files (box art, screenshots, marquees, videos, manuals)
-    - Renames all media files to match ROM filenames for proper OS handling
-    - Converts images to PNG format (optional) and trims marquee whitespace
-    - Handles Batocera and Mustard OS export formats.
-    - BATOCERA: Generates Batocera-compatible gamelist.xml files for each platform
-    - MUSTARD OS: Generates a text file with descriptions for each game from LaunchBox metadata
-    - Can filter to only export recently added games (recents_only mode)
-      * When enabled, only exports games added within the last N days (configurable)
-      * Useful for incremental updates without re-exporting your entire collection
-      * Games without DateAdded metadata will be skipped in this mode
-    - Preserves game ratings, release dates, developers, publishers, genres, and player counts
-    - Export games from one or more LaunchBox playlists
+Also exports Mustard OS-compatible formatted images and folder structure, 
+and can export LaunchBox playlists as separate folder targets (for example,
+when exporting to multiple devices).
 
 OUTPUT STRUCTURE for Batocera:
     output_dir/
-    ├── os_name/
+    |   ├── os_name/
     |   ├── playlist_name/           (if exporting from playlists, otherwise media goes directly under platform folder)
     |   |   ├── platform_name/
-    │   │   │   ├── gamelist.xml
-    │   │   │   ├── covers/          (box art)
-    │   │   │   ├── screenshots/     (gameplay screenshots)
-    │   │   │   ├── marquees/        (clear logos/wheels)
-    │   │   │   ├── videos/          (video previews)
-    │   │   │   └── manuals/         (PDF manuals)
+    │   │   │   ├── box/             (box art)
+    │   │   │   ├── grid/            (icon for grid view)
+    │   │   │   ├── preview/         (gameplay screenshots)
+    │   │   │   ├── splash/          (splash screen to show before game starts)
+    │   │   │   └── text/            (text files with game descriptions)
 
 OUTPUT STRUCTURE for Mustard OS:
     output_dir/
@@ -66,24 +38,38 @@ OUTPUT STRUCTURE for Mustard OS:
     │   │   │   ├── splash/          (splash screen to show before game starts)
     │   │   │   └── text/            (text files with game descriptions)
 
-USAGE:
-    1. Configure the variables in the "CONFIGURATION" section below
-    2. Run the script: python launchbox-export.py
-    3. Check the output directory for exported files
-    4. Copy to SD card:
-        * Batocera: Copy the platform folders to your Batocera system's roms directory
-        * Mustard OS: Copy 
+Configuration (each constant below is also a CLI flag of the same name
+in kebab-case, e.g. COPY_ROMS <-> --copy-roms / --no-copy-roms):
 
-NOTES:
-    - Image filenames are sanitized to handle special characters
-    - All media files are renamed to match ROM filenames (e.g., if ROM is "game.chd", 
-      box art becomes "game.png") to support platforms like ES-DE.
-    - Marquee images are trimmed but not converted to preserve transparency
-    - If media files cannot be found, warnings will be printed
-    - Progress and statistics are displayed during execution
-    - With recents_only=True, only games added in the last N days are exported
-      (perfect for daily/weekly incremental exports to keep your collection updated)
-    - Add option to export only games in a specific playlist, with a prompt to choose from available playlists.
+    LB_DIR          Root of your LaunchBox installation. Platform XMLs
+                    are read from <LB_DIR>/Data/Platforms/*.xml; media
+                    from <LB_DIR>/images, <LB_DIR>/manuals, <LB_DIR>/videos.
+    OUTPUT_DIR      Destination root. One subdirectory is created per
+                    entry in PLATFORMS and populated with a gamelist.xml
+                    plus media folders.
+    COPY_ROMS       Copy ROM files alongside the metadata. Off by default
+                    because ROMs can be huge; usually you only want the
+                    metadata + art.
+    COPY_MEDIA      Actually write media files to disk. If False,
+                    gamelist.xml still references the expected paths,
+                    which is useful when re-running after media was
+                    already copied on a previous pass.
+    CONVERT_TO_PNG  Convert .jpg/.jpeg sources to .png in the output and
+                    keep any transparency. Marquees always save as PNG
+                    regardless of this flag.
+    RECENTS_ONLY    Only export games whose DateAdded falls within the
+                    last RECENT_DAYS days. Intended for fast incremental
+                    refreshes. Games with missing or unparseable
+                    DateAdded are skipped and counted in the final summary.
+    RECENT_DAYS     Window size in days for RECENTS_ONLY mode.
+    WORKERS         Thread-pool size for per-game processing. Work is
+                    I/O-bound (disk copies + PIL encode), so values above
+                    CPU count can still help until the output disk
+                    saturates.
+    PLATFORMS       {LaunchBox platform name: Batocera output folder}.
+                    Uncomment the entries you want to export.
+
+Run with -h for the full CLI flag list.
 
 TODO:
     - Export directly to SD card, verifying that it's loaded and has enough space before starting. Options: delete existing files
@@ -91,14 +77,15 @@ TODO:
     - Add support for Garlic OS.
 """
 
-from ast import If
-import glob
+import argparse
+import glob # TODO: get rid of this. It's from an older version, but one function still uses it.
 import os
+import traceback
+import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from shutil import copy
-from typing import Any, Collection, Dict, List, Tuple, Optional
-import xml.etree.ElementTree as ET
-from xml.dom import minidom
+from typing import Any, Collection, Dict, List, Optional, Tuple
 
 try:
     from PIL import Image
@@ -109,7 +96,7 @@ except ImportError as e:
 
 
 # ============================================================================
-# CONFIGURATION
+# CONFIGURATION (defaults — overridable via CLI flags)
 # ============================================================================
 
 # Testing
@@ -117,12 +104,15 @@ TEST_RUN = False  # Set to True to go through the motions without copying files,
                   # output folder and gamelist.xml with correct paths for testing purposes.
 VERBOSE = False    # Print detailed processing info for each game
 
-# Export options
-COPY_ROMS = True
+LB_DIR = r'R:\Games\LaunchBox'
+OUTPUT_DIR = r'R:\Launchbox-Export'
+
+COPY_ROMS = False
 COPY_MEDIA = True
 CONVERT_TO_PNG = True
 RECENTS_ONLY = False
-RECENT_DAYS = 7  # Export games added in last N days
+RECENT_DAYS = 7
+WORKERS = 8
 USE_PLAYLIST = True # Set to True to only export games in a specific playlist, or False to export all games in the platform
                     # Opens a prompt to choose an available playlist.
 
@@ -138,7 +128,7 @@ MUSTARD_OS = "Mustard OS"
 
 OS_TARGETS: list[str] = [
     # Comment out any OS to which you don't want to export
-    #BATOCERA,
+    BATOCERA,
     MUSTARD_OS,
 ]
 
@@ -213,14 +203,13 @@ OS_SETTINGS: Dict[str, Dict[str, Any]] = {
     }
 }
 
-# Platforms: Launchbox name -> output folder name
 PLATFORMS = {
     # Uncomment platforms you want to export:
     # "3DO Interactive Multiplayer": "3do",
     # "Arcade": "mame",
     # "Arcade - FBNeo": "fbneo",
     # "Atari 2600": "atari2600",
-    # "Atari 7800": "atari7800",
+    "Atari 7800": "atari7800",
     # "Atari Jaguar": "jaguar",
     # "Atari Lynx": "lynx",
     # "ColecoVision": "colecovision",
@@ -240,11 +229,11 @@ PLATFORMS = {
     # "Nintendo 3DS": "3ds",
     # "Nintendo 64": "n64",
     # "Nintendo DS": "nds",
-    "Nintendo Entertainment System": "nes",
+    # "Nintendo Entertainment System": "nes",
     # "Nintendo Famicom Disk System": "fds",
     # "Nintendo Game Boy Advance": "gba",
     # "Nintendo Game Boy Color": "gbc",
-    "Nintendo Game Boy": "gb",
+    # "Nintendo Game Boy": "gb",
     # "Nintendo GameCube": "gamecube",
     # "Nintendo MSU-1": "snes-msu1",
     # "Nintendo Satellaview": "satellaview",
@@ -324,57 +313,83 @@ def _resize_image(img: Image.Image, name: str, size: Tuple[int, int], resample: 
 """End of TEST_RUN wrappers"""
 
 def sanitize_filename(filename: str) -> str:
-    """Sanitize a filename by replacing invalid characters."""
+    """Replace invalid filesystem characters with underscores."""
     invalid_chars = [':', "'", '/', '*', '?', '"', '<', '>', '|']
     for char in invalid_chars:
         filename = filename.replace(char, '_')
     return filename
 
 
-def find_media_file(game_name: str, media_files: List[str]) -> Optional[str]:
+def list_media_files(media_dir: str) -> List[str]:
+    """Return every file path beneath media_dir."""
+    if not os.path.isdir(media_dir):
+        return []
+    files = []
+    for root, _, filenames in os.walk(media_dir):
+        for fn in filenames:
+            files.append(os.path.join(root, fn))
+    return files
+
+
+def build_media_lookup(media_files: List[str]) -> Dict[str, str]:
     """
-    Find the first matching media file for a game.
+    Build a {lowercased_game_name_stem -> filepath} map for O(1) lookup.
+
+    Handles LaunchBox's numbered-variant suffix (e.g. Game-01.png,
+    Game-02.png, Game-09.jpg) by stripping a trailing "-0N" from the
+    stem before indexing, which mirrors the old startswith("name-0")
+    matching behavior. First file wins when multiple variants share
+    a stem, so sort the input for determinism.
     """
-    sanitized_name = sanitize_filename(game_name)
-    sanitized_lower = sanitized_name.lower()
-    
-    for filepath in media_files:
+    lookup: Dict[str, str] = {}
+    for filepath in sorted(media_files):
         filename = os.path.basename(filepath)
-        filename_lower = filename.lower()
-        
-        # Check for common naming patterns
-        if (filename.startswith(sanitized_name + "-0") or 
-            filename.startswith(sanitized_name + ".") or
-            filename_lower == sanitized_lower + ".mp4"):
-            return filepath
-    
-    return None
+        stem, _ = os.path.splitext(filename)
+
+        dash_idx = stem.rfind("-0")
+        if 0 <= dash_idx < len(stem) - 2:
+            key = stem[:dash_idx].lower()
+        else:
+            key = stem.lower()
+
+        lookup.setdefault(key, filepath)
+    return lookup
+
+
+def find_media_file(sanitized_name: str, lookup: Dict[str, str]) -> Optional[str]:
+    """Return a media filepath for a game from a prebuilt lookup, or None."""
+    return lookup.get(sanitized_name.lower())
 
 
 def parse_date_added(date_str: str) -> Optional[datetime]:
     """Parse LaunchBox DateAdded field with error handling."""
     try:
-        clean_date = date_str.strip().replace("Z", "")
-        
+        clean_date = date_str.strip().rstrip("Z")
+
         if "T" in clean_date:
-            # Full datetime format
             return datetime.fromisoformat(clean_date.split(".")[0])
-        else:
-            # Date only format (YYYY-MM-DD)
-            return datetime.fromisoformat(clean_date + "T00:00:00")
+        return datetime.fromisoformat(clean_date + "T00:00:00")
     except (ValueError, AttributeError):
         return None
 
 
-def is_game_recent(game_element: ET.Element, cutoff_date: datetime) -> bool:
-    """Check if a game was added after the cutoff date."""
+def is_game_recent(game_element: ET.Element, cutoff_date: datetime) -> Tuple[bool, bool]:
+    """
+    Return (is_recent, has_parseable_date).
+
+    The second flag lets callers tell "skipped because old" apart from
+    "skipped because no DateAdded metadata exists" so the latter can be
+    reported in the final summary.
+    """
     date_elem = game_element.find("DateAdded")
-    
     if date_elem is None or not date_elem.text:
-        return False
-    
+        return False, False
+
     added_date = parse_date_added(date_elem.text)
-    return added_date is not None and added_date >= cutoff_date
+    if added_date is None:
+        return False, False
+
+    return added_date >= cutoff_date, True
 
 
 def process_image(img_path: str, output_path: str, media_type: str, export_type: str = "", size: Optional[Tuple[int, int]] = None) -> None:
@@ -388,49 +403,49 @@ def process_image(img_path: str, output_path: str, media_type: str, export_type:
         saveas: Output format for the image
         size: (width, height) for resizing if needed
     """
-    img = Image.open(img_path)
-    ext = os.path.splitext(img_path)[1].lower()
-    name = os.path.basename(img_path) # for logging purposes
+    with Image.open(img_path) as img:
+        ext = os.path.splitext(img_path)[1].lower()
+        name = os.path.basename(img_path) # for logging purposes
 
-    # Resize image if size parameter is provided
-    if size is not None:
-        current_width, current_height = img.size
-        aspect_ratio = current_width / current_height
-        max_width, max_height = size
+        # Resize image if size parameter is provided
+        if size is not None:
+            current_width, current_height = img.size
+            aspect_ratio = current_width / current_height
+            max_width, max_height = size
 
-        # LaunchBox widths for box art is inconsistent, so first base width on height
-        # Handling all image types for now, but maybe this needs to be for box art only?
-        target_height = max_height
-        target_width = int(max_height * aspect_ratio) 
+            # LaunchBox widths for box art is inconsistent, so first base width on height
+            # Handling all image types for now, but maybe this needs to be for box art only?
+            target_height = max_height
+            target_width = int(max_height * aspect_ratio) 
 
-        # And then resize to fit within the max_width.
-        if target_width > max_width:
-            target_width = max_width
-            target_height = int(max_width / aspect_ratio)
+            # And then resize to fit within the max_width.
+            if target_width > max_width:
+                target_width = max_width
+                target_height = int(max_width / aspect_ratio)
+            
+            # Only resize if the current size is different from target size
+            if (current_width, current_height) != (target_width, target_height):
+                # Use LANCZOS resampling for high quality
+                img = _resize_image(img, name, (target_width, target_height), Image.Resampling.LANCZOS)
         
-        # Only resize if the current size is different from target size
-        if (current_width, current_height) != (target_width, target_height):
-            # Use LANCZOS resampling for high quality
-            img = _resize_image(img, name, (target_width, target_height), Image.Resampling.LANCZOS)
-    
-    # Special handling for marquees: trim but don't convert
-    if media_type == MARQUEE:
-        bbox = img.getbbox()
-        if bbox:
-            img = _crop_image(img, name, bbox)
-        _save_image(img, output_path, format="PNG")
-        return
+        # Special handling for marquees: trim but don't convert
+        if media_type == MARQUEE:
+            bbox = img.getbbox()
+            if bbox:
+                img = _crop_image(img, name, bbox)
+            _save_image(img, output_path, format="PNG")
+            return
 
-    # Convert to PNG if enabled and applicable
-    if ext in [".jpg", ".jpeg", ".png"] and (CONVERT_TO_PNG or export_type == "PNG"):
-        # Preserve transparency
-        if 'A' in img.getbands():
-            img = _convert_image(img, name, "RGBA")
+        # Convert to PNG if enabled and applicable
+        if ext in [".jpg", ".jpeg", ".png"] and (CONVERT_TO_PNG or export_type == "PNG"):
+            # Preserve transparency
+            if 'A' in img.getbands():
+                img = _convert_image(img, name, "RGBA")
+            else:
+                img = _convert_image(img, name, "RGB")
+            _save_image(img, output_path, format="PNG")
         else:
-            img = _convert_image(img, name, "RGB")
-        _save_image(img, output_path, format="PNG")
-    else:
-        _save_image(img, output_path)
+            _save_image(img, output_path)
 
 def save_media_file(
     source_path: str,
@@ -442,6 +457,9 @@ def save_media_file(
 ) -> str:
     """
     Copy and process media file, returning relative path for XML.
+    When COPY_MEDIA is False no file is written, but the expected path
+    is still returned so gamelist.xml can reference media that was
+    copied on a previous run.
     
     Args:
         source_path: Original media file path
@@ -459,34 +477,41 @@ def save_media_file(
         print(f"    Processing {media_type}: {source_path}")
     
     # Determine output filename and extension
-    if ext in [".jpg", ".jpeg", ".png"] and (CONVERT_TO_PNG or export_type == "PNG"):
-        new_filename = f"{rom_basename}.png"
-    else:
-        new_filename = f"{rom_basename}{ext}"
+    is_image = ext in [".jpg", ".jpeg", ".png"]
+    target_ext = ".png" if (is_image and CONVERT_TO_PNG  or export_type == "PNG") else ext
+    new_filename = f"{rom_basename}{target_ext}"
+    rel_path = f"./{os.path.basename(output_dir)}/{new_filename}"
+
+    if not COPY_MEDIA:
+        return rel_path
     
+    os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, new_filename)
-    
+
     try:
         # Process images, copy other media types
-        if ext in [".jpg", ".jpeg", ".png"]:
+        if is_image:
             process_image(source_path, output_path, media_type, export_type, size)
-        elif COPY_MEDIA:
+        else:
             _copy(source_path, output_path)
     except Exception as e:
         print(f"  Warning: Failed to process {source_path}: {e}")
-        # Attempt fallback copy
+        # Fallback: raw copy preserving the SOURCE extension so we don't
+        # end up with raw JPEG bytes inside a .png file.
+        fallback_filename = f"{rom_basename}{ext}"
+        fallback_path = os.path.join(output_dir, fallback_filename)
         try:
-            if COPY_MEDIA:
-                _copy(source_path, output_path)
+            _copy(source_path, fallback_path)
+            rel_path = f"./{os.path.basename(output_dir)}/{fallback_filename}"
         except Exception as e2:
             print(f"  Error: Fallback copy also failed: {e2}")
-    
-    # Return relative path for XML
-    return f"./{os.path.basename(output_dir)}/{new_filename}"
 
+    return rel_path
 
 def build_media_index(media_dir: str) -> List[str]:
-    """Build a list of all media files in a directory."""
+    """Build a list of all media files in a directory.
+    TODO: This is referenced in my code, but not in base. May need to replace calls to this with one of the above functions.
+    """
     if not os.path.isdir(media_dir):
         return []
     
@@ -495,65 +520,51 @@ def build_media_index(media_dir: str) -> List[str]:
         if os.path.isfile(f)
     ]
 
-
 def extract_game_metadata(game_elem: ET.Element) -> Dict[str, str]:
-    """Extract all metadata fields from a game XML element."""
-    metadata = {}
-    
-    # Star rating (convert to 0-1 scale)
+    """Extract metadata fields from a game XML element."""
+    metadata: Dict[str, str] = {}
+
     if (rating_elem := game_elem.find("StarRating")) is not None and rating_elem.text:
         try:
-            rating_value = int(rating_elem.text)
-            metadata["rating"] = str(rating_value * 2 / 10)
-        except ValueError:
+            metadata["rating"] = str(int(rating_elem.text) * 2 / 10)
+        except (ValueError, TypeError):
             pass
-    
-    # Release date (convert to Batocera format)
+
     if (release_elem := game_elem.find("ReleaseDate")) is not None and release_elem.text:
         metadata["releasedate"] = release_elem.text.replace("-", "").split("T")[0] + "T000000"
-    
-    # Simple text fields
+
     text_fields = ["Developer", "Publisher", "Genre", "Notes"]
     xml_to_key = {
         "Developer": "developer",
         "Publisher": "publisher",
-        "Genre": "genre",
-        "Notes": "desc"
+        "Genre":     "genre",
+        "Notes":     "desc",
     }
-    
-    for xml_tag in text_fields:
+    for xml_tag, key in xml_to_key.items():
         if (elem := game_elem.find(xml_tag)) is not None and elem.text:
-            metadata[xml_to_key[xml_tag]] = elem.text
-    
-    # Max players (handle "0" prefix)
+            metadata[key] = elem.text
+
     if (players_elem := game_elem.find("MaxPlayers")) is not None and players_elem.text:
         mp = players_elem.text
         metadata["players"] = "1+" if mp.startswith("0") else mp
-    
+
     return metadata
 
 
 def write_gamelist_xml(games: List[Dict[str, str]], output_path: str) -> None:
     """Write games list to Batocera-compatible XML file."""
     root = ET.Element("gameList")
-    
     for game_data in games:
         game_elem = ET.SubElement(root, "game")
         for key, value in game_data.items():
             child = ET.SubElement(game_elem, key)
             child.text = value
     
-    # Pretty print XML
-    xml_str = minidom.parseString(ET.tostring(root)).toprettyxml(indent="    ")
-    
-    # Remove XML declaration
-    xml_lines = xml_str.splitlines()
-    if xml_lines[0].startswith("<?xml"):
-        xml_str = "\n".join(xml_lines[1:])
+    ET.indent(root, space="    ")
     
     # Write to file
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write(xml_str)
+        f.write(ET.tostring(root, encoding="unicode"))
 
 
 def write_description_file(descriptions: Dict[str, str], output_dir: str, rom_basename: str) -> str:
@@ -645,72 +656,84 @@ def choose_playlist() -> Optional[list[str]]:
 
 
 # ============================================================================
-# MAIN PROCESSING
+# PER-GAME AND PER-PLATFORM PROCESSING
 # ============================================================================
 
-def process_platform(
-    target_os: str,
-    platform_lb: str,
-    platform_rp: str,
-    output_dir: str,
-    cutoff_date: Optional[datetime],
-    playlist_game_ids: Optional[Collection[str]] = None,
-) -> tuple:
-    """
-    Process a single platform and return statistics.
+def process_game(
+    game_elem: ET.Element,
+    output_platform_dir: str,
+    media_index: List[Dict],
+) -> Tuple[Optional[Dict[str, str]], int]:
+    """Extract and export a single game. Returns (game_data, media_files_copied)."""
+    title_elem = game_elem.find("Title")
+    rom_path_elem = game_elem.find("ApplicationPath")
 
-    target_os must be verified to be in OS_MAPPINGS before calling this function.
-    
-    Returns:
-        Tuple of (games_exported, media_copied)
-    """
-    print(f"\nProcessing {platform_lb} → {platform_rp}")
-    
-# TODO: Need to properly handle media types' output directories that use <platform> placeholder
+    if rom_path_elem is None or rom_path_elem.text is None:
+        return None, 0
+    if title_elem is None or not title_elem.text:
+        return None, 0
 
-    # Build paths
-    lb_platform_xml = os.path.join(LB_DIR, "Data", "Platforms", f"{platform_lb}.xml")
-    rom_output_relpath = OS_SETTINGS[target_os].get(ROM_OUTPUT, "").replace(PLAT, platform_rp)
-    rom_output_dir = os.path.join(output_dir, rom_output_relpath) if rom_output_relpath else output_dir
-    
-    # Check if platform XML exists
-    if not os.path.isfile(lb_platform_xml):
-        print(f"  Warning: Platform XML not found: {lb_platform_xml}")
-        return 0, 0
-    
-    # Parse XML
+    game_title = title_elem.text
+
     try:
-        xmltree = ET.parse(lb_platform_xml)
-    except ET.ParseError as e:
-        print(f"  Error: Failed to parse XML: {e}")
-        return 0, 0
-    
-    # Build media file indexes
-    print("  Indexing media files...")
-    media_types = OS_SETTINGS[target_os][MEDIA_TYPES]
-    for media in media_types:
-        # Collect files from all possible subdirectories for this media type (although only the first match will be used)
-        all_files = []
-        if media["type"] == DESCRIPTION:
-            # Descriptions don't have files, but we want to keep the structure consistent
-            media["files"] = []
-            continue
-        for sub in media["subdir"]:
-            if sub.startswith(".."):
-                media_dir = os.path.join(LB_DIR, sub.replace("..", "").strip("/\\"), platform_lb)
-            else:
-                media_dir = os.path.join(LB_DIR, "images", platform_lb, sub)
-            all_files.extend(build_media_index(media_dir))  # Collect from all dirs
-        media["files"] = all_files  # Store combined list for later use
-    
-    # Create output directories
-    os.makedirs(rom_output_dir, exist_ok=True)
+        rom_path = rom_path_elem.text
+        rom_name = os.path.basename(rom_path)
+        rom_basename = os.path.splitext(rom_name)[0]
 
-    # Process games
+        game_data: Dict[str, str] = {
+            "path": f"./{rom_name}",
+            "name": game_title,
+        }
+        game_data.update(extract_game_metadata(game_elem))
+
+        sanitized_title = sanitize_filename(game_title)
+        media_count = 0
+
+        for entry in media_index:
+            media_path = find_media_file(sanitized_title, entry["lookup"])
+            if media_path:
+                output_dir = os.path.join(output_platform_dir, entry["output"])
+                rel_path = save_media_file(
+                    media_path, output_dir, rom_basename, entry["type"]
+                )
+                game_data[entry["xmltag"]] = rel_path
+                media_count += 1
+            else:
+                game_data[entry["xmltag"]] = ""
+                if entry["output"] in ESSENTIAL_MEDIA_OUTPUTS:
+                    print(f"  ERROR: No {entry['type']} found for: {game_title}")
+
+        if COPY_ROMS and os.path.isfile(rom_path):
+            try:
+                copy(rom_path, output_platform_dir)
+            except Exception as e:
+                print(f"  Warning: Failed to copy ROM {rom_name}: {e}")
+
+        return game_data, media_count
+
+    except Exception as e:
+        print(f"  Error processing '{game_title}': {e}")
+        traceback.print_exc()
+        return None, 0
+
+def process_game_2(
+    target_os: str,
+    game_elem: ET.Element,
+    output_dir: str, # base output directory
+    console_name: str,
+    output_platform_dir: str,
+    media_index: List[Dict],
+    playlist_game_ids: Optional[Collection[str]] = None,
+) -> Tuple[Optional[Dict[str, str]], int]:
+    """Merge this stuff in to process_game(). It's all sorts of broken now."""
+    title_elem = game_elem.find("Title")
+    rom_path_elem = game_elem.find("ApplicationPath")
+        # Process games
     games_found = []
     total_games = 0
     local_media_count = 0
     generating_xml = OS_SETTINGS[target_os][GENERATE_XML]
+    
     
     for game in xmltree.getroot().iter("Game"):
         total_games += 1
@@ -762,7 +785,7 @@ def process_platform(
             required_media = OS_SETTINGS[target_os][REQUIRED_OUTPUTS]
 
             for media in media_types:
-                media_output_temp = media["output"].replace(PLAT, platform_rp)
+                media_output_temp = media["output"].replace(PLAT, console_name)
                 media_output_dir = os.path.join(output_dir, media_output_temp)
 
                 if media ["type"] == DESCRIPTION:
@@ -785,6 +808,9 @@ def process_platform(
                     if media["output"] in required_media:
                         print(f"    [ERROR]: No {media['type']} found for: {game_title}")
             
+            rom_output_relpath = OS_SETTINGS[target_os].get(ROM_OUTPUT, "").replace(PLAT, console_name)
+            rom_output_dir = os.path.join(output_dir, rom_output_relpath) if rom_output_relpath else output_dir
+
             # Copy ROM if enabled
             if COPY_ROMS and os.path.isfile(rom_path):
                 try:
@@ -793,38 +819,182 @@ def process_platform(
                     print(f"  Warning: Failed to copy ROM {rom_name}: {e}")
             
             games_found.append(game_data)
-            
         except Exception as e:
             print(f"  Error processing game: {e}")
             continue
+    return None, 0
+
+def process_platform(
+    target_os: str,
+    platform_lb: str,
+    platform_rp: str,
+    output_dir: str,
+    cutoff_date: Optional[datetime],
+    playlist_game_ids: Optional[Collection[str]] = None,
+) -> Tuple[int, int, int]:
+    """
+    Process a single platform.
+
+    Returns (games_exported, media_copied, games_skipped_no_date).
+    TODO: Pre-merge tuple was (games_exported, media_copied), so make sure to update all call sites if changing the return type.
+    """
+    print(f"\nProcessing {platform_lb} → {platform_rp}")
+
+    lb_platform_xml = os.path.join(LB_DIR, "Data", "Platforms", f"{platform_lb}.xml")
+    output_platform_dir = os.path.join(OUTPUT_DIR, platform_rp) #TODO: This is merged in, but it may be unnecessary. Left in for temporary compatibility.
+    rom_output_relpath = OS_SETTINGS[target_os].get(ROM_OUTPUT, "").replace(PLAT, platform_rp)
+    rom_output_dir = os.path.join(output_dir, rom_output_relpath) if rom_output_relpath else output_dir
     
-    # Write gamelist.xml
+    # Check if platform XML exists
+    if not os.path.isfile(lb_platform_xml):
+        print(f"  Warning: Platform XML not found: {lb_platform_xml}")
+        return 0, 0, 0
+
+    os.makedirs(output_platform_dir, exist_ok=True) #TODO: Check if necessary.
+
+    try:
+        xmltree = ET.parse(lb_platform_xml)
+    except ET.ParseError as e:
+        print(f"  Error: Failed to parse XML: {e}")
+        return 0, 0, 0
+
+     # Build media file indexes
+    print("  Indexing media files...")
+    media_types = OS_SETTINGS[target_os][MEDIA_TYPES]
+    # media_index: List[Dict] = [] # from merged
+    for media in media_types:
+        # Collect files from all possible subdirectories for this media type (although only the first match will be used)
+        all_files = []
+        if media["type"] == DESCRIPTION:
+            # Descriptions don't have files, but we want to keep the structure consistent
+            media["files"] = []
+            continue
+        for sub in media["subdir"]:
+            if sub.startswith(".."):
+                media_dir = os.path.join(LB_DIR, sub.replace("..", "").strip("/\\"), platform_lb)
+            else:
+                media_dir = os.path.join(LB_DIR, "images", platform_lb, sub)
+            
+            all_files.extend(build_media_index(media_dir))  # Collect from all dirs
+        media["files"] = all_files  # Store combined list for later use
+        """ # from merged. See if any of this is necessary.
+        media_files = list_media_files(media_dir) # check if this is similar to build_media_index().
+        media_index.append({
+            "type":   mapping["type"],
+            "xmltag": mapping["xmltag"],
+            "output": mapping["output"],
+            "lookup": build_media_lookup(media_files),
+        })
+        """
     
-    if generating_xml and games_found:
-        xml_relpath = OS_SETTINGS[target_os][XML_PATH].replace(PLAT, platform_rp)
-        xml_path = os.path.join(output_dir, xml_relpath)
+    # Create output directories
+    os.makedirs(rom_output_dir, exist_ok=True)
+
+    # Filter games by date up front so the thread pool only sees eligible ones.
+    games_to_process: List[ET.Element] = []
+    skipped_no_date = 0
+
+    # Process games
+    games_found = []
+    total_games = 0
+    local_media_count = 0
+    generating_xml = OS_SETTINGS[target_os][GENERATE_XML]
+    
+    for game in xmltree.getroot().iter("Game"):
+        total_games += 1
+        if cutoff_date is not None:
+            is_recent, has_date = is_game_recent(game, cutoff_date)
+            if not has_date:
+                skipped_no_date += 1
+                continue
+            if not is_recent:
+                continue
+        games_to_process.append(game)
+
+    # Process in parallel. I/O-bound work (disk copies, PIL conversions
+    # that release the GIL) benefits from threads.
+    games_found: List[Dict[str, str]] = []
+    local_media_count = 0
+
+    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+        futures = [
+            executor.submit(process_game, game, output_platform_dir, media_index)
+            for game in games_to_process
+        ]
+        for future in as_completed(futures):
+            game_data, media_count = future.result()
+            if game_data is not None:
+                games_found.append(game_data)
+                local_media_count += media_count
+
+    if games_found:
+        xml_path = os.path.join(output_platform_dir, "gamelist.xml")
         try:
             write_gamelist_xml(games_found, xml_path)
         except Exception as e:
             print(f"  Error writing gamelist.xml: {e}")
-            return 0, 0
-    
-    # Print summary
+            return 0, 0, skipped_no_date
+
     if RECENTS_ONLY:
         print(f"  Exported {len(games_found)} recent games out of {total_games} total")
+        if skipped_no_date:
+            print(f"  Skipped {skipped_no_date} games with missing/unparseable DateAdded")
     else:
         print(f"  Exported {len(games_found)} games")
-    
-    return len(games_found), local_media_count
 
-def main():
-    """Main execution function."""
+    return len(games_found), local_media_count, skipped_no_date
+
+
+# ============================================================================
+# CLI
+# ============================================================================
+
+# TODO: Make sure all the new options are wired in and working correctly, and update the help text for each one.
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Export LaunchBox metadata and media to a Batocera-compatible tree."
+    )
+    parser.add_argument("--lb-dir", default=LB_DIR,
+                        help="Path to LaunchBox installation (default: %(default)s)")
+    parser.add_argument("--output-dir", default=OUTPUT_DIR,
+                        help="Destination directory (default: %(default)s)")
+    parser.add_argument("--copy-roms", action=argparse.BooleanOptionalAction,
+                        default=COPY_ROMS, help="Also copy ROM files (default: %(default)s)")
+    parser.add_argument("--copy-media", action=argparse.BooleanOptionalAction,
+                        default=COPY_MEDIA, help="Copy media files (default: %(default)s)")
+    parser.add_argument("--convert-to-png", action=argparse.BooleanOptionalAction,
+                        default=CONVERT_TO_PNG,
+                        help="Convert JPG images to PNG (default: %(default)s)")
+    parser.add_argument("--recents-only", action=argparse.BooleanOptionalAction,
+                        default=RECENTS_ONLY,
+                        help="Only export games added in the last --recent-days days")
+    parser.add_argument("--recent-days", type=int, default=RECENT_DAYS,
+                        help="Days threshold for --recents-only (default: %(default)s)")
+    parser.add_argument("--workers", type=int, default=WORKERS,
+                        help="Thread-pool size for media copying (default: %(default)s)")
+    return parser.parse_args()
+
+
+def main() -> None:
+    global LB_DIR, OUTPUT_DIR, COPY_ROMS, COPY_MEDIA, CONVERT_TO_PNG
+    global RECENTS_ONLY, RECENT_DAYS, WORKERS
+
+    args = parse_args()
+    LB_DIR         = args.lb_dir
+    OUTPUT_DIR     = args.output_dir
+    COPY_ROMS      = args.copy_roms
+    COPY_MEDIA     = args.copy_media
+    CONVERT_TO_PNG = args.convert_to_png
+    RECENTS_ONLY   = args.recents_only
+    RECENT_DAYS    = args.recent_days
+    WORKERS        = args.workers
+
     print("=" * 70)
     print("LaunchBox to Device Export")
     print("=" * 70)
-    
-    # Calculate cutoff date for recent games
-    cutoff_date = None
+
+    cutoff_date: Optional[datetime] = None
     if RECENTS_ONLY:
         cutoff_date = datetime.now() - timedelta(days=RECENT_DAYS)
         print(f"\nExporting games added since: {cutoff_date.strftime('%Y-%m-%d')}")
@@ -879,11 +1049,14 @@ def main():
             # Process each platform
             total_games = 0
             total_media = 0
+            total_skipped_no_date = 0
             total_platforms = 0
 
             for platform_lb, platform_rp in PLATFORMS.items():
-                games_count, media_count = process_platform(target_os, platform_lb, platform_rp, output_dir, cutoff_date, game_ids if USE_PLAYLIST else None)
+                games_count, media_count, skipped_no_date = process_platform(target_os, platform_lb, platform_rp, output_dir, cutoff_date, game_ids if USE_PLAYLIST else None)
                 
+                total_skipped_no_date += skipped_no_date
+
                 if games_count > 0:
                     total_games += games_count
                     total_media += media_count
@@ -896,8 +1069,10 @@ def main():
             else:
                 print(f"  Export Complete!")
             print(f"  Platforms: {total_platforms}")
-            print(f"  Games: {total_games}")
-            print(f"  Media files: {total_media}")
+            print(f"  Games: {total_games:,}")
+            print(f"  Media files: {total_media:,}")
+            if RECENTS_ONLY and total_skipped_no_date:
+                print(f"  Skipped (no DateAdded): {total_skipped_no_date:,}")
             print("=" * 70)
             print("")
 
