@@ -100,12 +100,9 @@ except ImportError as e:
 # ============================================================================
 
 # Testing
-TEST_RUN = False  # Set to True to go through the motions without copying files, but still generate
+TEST_RUN = True  # Set to True to go through the motions without copying files, but still generate
                   # output folder and gamelist.xml with correct paths for testing purposes.
 VERBOSE = False    # Print detailed processing info for each game
-
-LB_DIR = r'R:\Games\LaunchBox'
-OUTPUT_DIR = r'R:\Launchbox-Export'
 
 COPY_ROMS = False
 COPY_MEDIA = True
@@ -973,12 +970,15 @@ def parse_args() -> argparse.Namespace:
                         help="Days threshold for --recents-only (default: %(default)s)")
     parser.add_argument("--workers", type=int, default=WORKERS,
                         help="Thread-pool size for media copying (default: %(default)s)")
+    parser.add_argument("--use-playlists", action=argparse.BooleanOptionalAction,
+                        default=USE_PLAYLIST,
+                        help="Use playlists for filtering games (default: %(default)s)")
     return parser.parse_args()
 
 
 def main() -> None:
     global LB_DIR, OUTPUT_DIR, COPY_ROMS, COPY_MEDIA, CONVERT_TO_PNG
-    global RECENTS_ONLY, RECENT_DAYS, WORKERS
+    global RECENTS_ONLY, RECENT_DAYS, WORKERS, USE_PLAYLIST
 
     args = parse_args()
     LB_DIR         = args.lb_dir
@@ -989,6 +989,7 @@ def main() -> None:
     RECENTS_ONLY   = args.recents_only
     RECENT_DAYS    = args.recent_days
     WORKERS        = args.workers
+    USE_PLAYLIST   = args.use_playlists
 
     print("=" * 70)
     print("LaunchBox to Device Export")
